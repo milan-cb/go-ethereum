@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"math/big"
 	"reflect"
 	"testing"
@@ -1043,4 +1044,159 @@ func TestSimulateV1WithBlockNumberOrHash(t *testing.T) {
 	if len(results) != 1 {
 		t.Fatalf("expected 1 block result, got %d", len(results))
 	}
+}
+
+func (s *sendRawTransactionSyncTestService) SendRawTransactionSync(
+	ctx context.Context,
+	rawTx hexutil.Bytes,
+	timeout *uint64,
+) (*types.Receipt, error) {
+	s.lastTimeout = timeout
+
+	// Return a mock receipt
+	return &types.Receipt{
+		Status:            1,
+		CumulativeGasUsed: 21000,
+		Logs:              []*types.Log{},
+		TxHash:            common.HexToHash("0x1234567890abcdef"),
+		GasUsed:           21000,
+		BlockNumber:       big.NewInt(1),
+	}, nil
+}
+
+type sendRawTransactionSyncTestService struct {
+	lastTimeout *uint64
+}
+
+func TestSendRawTransactionSync(t *testing.T) {
+	// Test RPC server that simulates eth_sendRawTransactionSync behavior
+	srv := rpc.NewServer()
+	service := &sendRawTransactionSyncTestService{}
+	if err := srv.RegisterName("eth", service); err != nil {
+		t.Fatalf("failed to register service: %v", err)
+	}
+	defer srv.Stop()
+
+	client := rpc.DialInProc(srv)
+	defer client.Close()
+
+	ec := ethclient.NewClient(client)
+	defer ec.Close()
+
+	ctx := context.Background()
+
+	// Create a test transaction
+	tx := types.NewTransaction(
+		0,
+		common.HexToAddress("0x0000000000000000000000000000000000000001"),
+		big.NewInt(1000),
+		21000,
+		big.NewInt(1000000000),
+		nil,
+	)
+	rawTx, err := tx.MarshalBinary()
+	if err != nil {
+		t.Fatalf("failed to marshal transaction: %v", err)
+	}
+
+	t.Run("NoTimeout", func(t *testing.T) {
+		// Test without timeout parameter
+		receipt, err := ec.SendRawTransactionSync(ctx, rawTx, nil)
+		if err != nil {
+			t.Fatalf("SendRawTransactionSync failed: %v", err)
+		}
+		if receipt == nil {
+			t.Fatal("expected receipt, got nil")
+		}
+		if receipt.Status != 1 {
+			t.Errorf("expected status 1, got %d", receipt.Status)
+		}
+		// Verify timeout was not sent
+		if service.lastTimeout != nil {
+			t.Errorf("expected nil timeout, got %v", *service.lastTimeout)
+		}
+	})
+
+	t.Run("WithTimeout", func(t *testing.T) {
+		// Test with timeout parameter (5 seconds)
+		timeout := 5 * time.Second
+		receipt, err := ec.SendRawTransactionSync(ctx, rawTx, &timeout)
+		if err != nil {
+			t.Fatalf("SendRawTransactionSync with timeout failed: %v", err)
+		}
+		if receipt == nil {
+			t.Fatal("expected receipt, got nil")
+		}
+		if receipt.Status != 1 {
+			t.Errorf("expected status 1, got %d", receipt.Status)
+		}
+		// Verify timeout was sent correctly (5000 milliseconds)
+		if service.lastTimeout == nil || *service.lastTimeout != 5000 {
+			t.Errorf("expected timeout 5000ms, got %v", service.lastTimeout)
+		}
+	})
+
+	t.Run("WithZeroTimeout", func(t *testing.T) {
+		// Test with zero timeout - should not send timeout parameter
+		timeout := 0 * time.Second
+		receipt, err := ec.SendRawTransactionSync(ctx, rawTx, &timeout)
+		if err != nil {
+			t.Fatalf("SendRawTransactionSync with zero timeout failed: %v", err)
+		}
+		if receipt == nil {
+			t.Fatal("expected receipt, got nil")
+		}
+		// Verify timeout was not sent for zero duration
+		if service.lastTimeout != nil {
+			t.Errorf("expected nil timeout for zero duration, got %v", *service.lastTimeout)
+		}
+	})
+
+	t.Run("WithNegativeTimeout", func(t *testing.T) {
+		// Test with negative timeout - should not send timeout parameter
+		timeout := -1 * time.Second
+		receipt, err := ec.SendRawTransactionSync(ctx, rawTx, &timeout)
+		if err != nil {
+			t.Fatalf("SendRawTransactionSync with negative timeout failed: %v", err)
+		}
+		if receipt == nil {
+			t.Fatal("expected receipt, got nil")
+		}
+		// Verify timeout was not sent for negative duration
+		if service.lastTimeout != nil {
+			t.Errorf("expected nil timeout for negative duration, got %v", *service.lastTimeout)
+		}
+	})
+
+	t.Run("SendTransactionSync", func(t *testing.T) {
+		// Test the SendTransactionSync wrapper method
+		chainID := big.NewInt(1)
+		signer := types.LatestSignerForChainID(chainID)
+		signedTx, err := types.SignNewTx(testKey, signer, &types.LegacyTx{
+			Nonce:    0,
+			To:       &common.Address{1},
+			Value:    big.NewInt(1000),
+			Gas:      21000,
+			GasPrice: big.NewInt(1000000000),
+		})
+		if err != nil {
+			t.Fatalf("failed to sign transaction: %v", err)
+		}
+
+		timeout := 2 * time.Second
+		receipt, err := ec.SendTransactionSync(ctx, signedTx, &timeout)
+		if err != nil {
+			t.Fatalf("SendTransactionSync failed: %v", err)
+		}
+		if receipt == nil {
+			t.Fatal("expected receipt, got nil")
+		}
+		if receipt.Status != 1 {
+			t.Errorf("expected status 1, got %d", receipt.Status)
+		}
+		// Verify timeout was sent correctly (2000 milliseconds)
+		if service.lastTimeout == nil || *service.lastTimeout != 2000 {
+			t.Errorf("expected timeout 2000ms, got %v", service.lastTimeout)
+		}
+	})
 }
